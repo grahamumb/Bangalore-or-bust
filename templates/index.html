@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Treadmill Cinema</title>
+    <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyD1SDaKF2zZeWFN4MtjWEbgwC4FMBeKxDk&libraries=geometry"></script>
+    <!-- Library for screenshots -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; }
+        #pano { height: 100vh; width: 100%; }
+        #overlay {
+            position: absolute; top: 20px; left: 20px;
+            color: #0f0; font-family: monospace; font-size: 1.5rem;
+            background: rgba(0,0,0,0.7); padding: 15px; border-radius: 5px; z-index: 10;
+        }
+        #btn-capture {
+            margin-top: 10px; padding: 10px; background: #222; color: #0f0;
+            border: 1px solid #0f0; cursor: pointer; font-family: monospace;
+        }
+        #btn-capture:active { background: #0f0; color: #000; }
+    </style>
+</head>
+<body>
+    <div id="overlay">
+        SPEED: <span id="speed_val">0.00</span> m/s<br>
+        DIST: <span id="dist_val">0</span> m<br>
+        <button id="btn-capture" onclick="takeScreenshot()">📸 SCREENSHOT</button>
+    </div>
+    <div id="pano"></div>
+
+    <script>
+        let panorama;
+        let lastPos = { lat: 0, lng: 0 };
+        let baseHeading = 0;
+        let lastApiCallTime = Date.now();
+        let isUserInteracting = false; // Flag to stop rotation
+
+        const API_UPDATE_INTERVAL = 30000; 
+        const TOTAL_ROTATION_DEGREES = 200; // Slowed down
+        const ROTATION_SPEED = TOTAL_ROTATION_DEGREES / (API_UPDATE_INTERVAL / 1000); 
+
+        function initPano() {
+            panorama = new google.maps.StreetViewPanorama(
+                document.getElementById("pano"),
+                {
+                    position: { lat: 0, lng: 0 },
+                    pov: { heading: 0, pitch: 0 },
+                    visible: true,
+                    disableDefaultUI: true
+                }
+            );
+
+            // FEATURE 1: Stop rotation on click
+            panorama.addListener('click', () => {
+                console.log("User clicked - pausing rotation.");
+                isUserInteracting = true;
+            });
+
+            requestAnimationFrame(rotationLoop);
+        }
+
+        function rotationLoop() {
+            if (!isUserInteracting) {
+                const now = Date.now();
+                const elapsed = now - lastApiCallTime;
+                
+                const currentRotation = (elapsed / 1000) * ROTATION_SPEED;
+                const totalHeading = (baseHeading + currentRotation) % 360;
+
+                panorama.setPov({ heading: totalHeading, pitch: 0 });
+            }
+            requestAnimationFrame(rotationLoop);
+        }
+
+        async function takeScreenshot() {
+            const btn = document.getElementById('btn-capture');
+            btn.innerText = "CAPTURING...";
+            
+            // Capture the entire body
+            const canvas = await html2canvas(document.body, {
+                useCORS: true, // Crucial for Google Maps images
+                allowTaint: true
+            });
+            
+            const base64Image = canvas.toDataURL('image/png');
+
+            // Send to Flask
+            await fetch('/save_screenshot', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image: base64Image })
+            });
+
+            btn.innerText = "📸 SCREENSHOT";
+            console.log("Screenshot sent to server.");
+        }
+
+        async function pollData() {
+            try {
+                const response = await fetch('/data');
+                const data = await response.json();
+                
+                document.getElementById('speed_val').innerText = data.speed.toFixed(2);
+                document.getElementById('dist_val').innerText = data.distance_travelled.toFixed(0);
+
+                const now = Date.now();
+                if (now - lastApiCallTime >= API_UPDATE_INTERVAL) {
+                    if (data.lat !== lastPos.lat || data.lng !== lastPos.lng) {
+                        const newPos = { lat: data.lat, lng: data.lng };
+                        
+                        const heading = google.maps.geometry.spherical.computeHeading(
+                            new google.maps.LatLng(lastPos),
+                            new google.maps.LatLng(newPos)
+                        );
+
+                        if (!isNaN(heading)) baseHeading = heading;
+                        
+                        panorama.setPosition(newPos);
+                        lastPos = newPos;
+                        lastApiCallTime = now;
+                        
+                        // FEATURE 1: Resume rotation on teleport
+                        isUserInteracting = false; 
+                    }
+                }
+            } catch (e) { console.error("Poll failed", e); }
+        }
+
+        window.onload = () => {
+            initPano();
+            setInterval(pollData, 500);
+        };
+    </script>
+</body>
+</html>
