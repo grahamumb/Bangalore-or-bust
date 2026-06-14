@@ -1,0 +1,6 @@
+flask>=3.0
+pyserial>=3.5
+gpxpy>=1.6
+geopy>=2.4
+anthropic>=0.69
+requests>=2.31
