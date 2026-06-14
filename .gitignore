@@ -1,0 +1,16 @@
+# Secrets & local config
+.env
+
+# Runtime state (regenerated; resumes the walk between runs)
+state.json
+sessions.json
+
+# Saved street-view screenshots
+screenshots/*.jpg
+screenshots/*.png
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

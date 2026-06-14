@@ -2,71 +2,115 @@
 <html>
 <head>
     <title>Treadmill Cinema</title>
-    <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyD1SDaKF2zZeWFN4MtjWEbgwC4FMBeKxDk&libraries=geometry"></script>
-    <!-- Library for screenshots -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://maps.googleapis.com/maps/api/js?key={{ gmaps_key }}&libraries=geometry"></script>
     <style>
         body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; }
         #pano { height: 100vh; width: 100%; }
+
         #overlay {
             position: absolute; top: 20px; left: 20px;
-            color: #0f0; font-family: monospace; font-size: 1.5rem;
+            color: #0f0; font-family: monospace; font-size: 1.3rem;
             background: rgba(0,0,0,0.7); padding: 15px; border-radius: 5px; z-index: 10;
+            line-height: 1.5;
         }
         #btn-capture {
             margin-top: 10px; padding: 10px; background: #222; color: #0f0;
-            border: 1px solid #0f0; cursor: pointer; font-family: monospace;
+            border: 1px solid #0f0; cursor: pointer; font-family: monospace; width: 100%;
         }
         #btn-capture:active { background: #0f0; color: #000; }
+
+        /* Mini-map, bottom-left */
+        #minimap {
+            position: absolute; bottom: 20px; left: 20px;
+            width: 220px; height: 160px; z-index: 10;
+            border: 2px solid #0f0; border-radius: 5px; overflow: hidden;
+            background: #111;
+        }
+
+        /* Town info, bottom-right. Compact chip that expands on hover. */
+        #town {
+            position: absolute; bottom: 20px; right: 20px; z-index: 10;
+            color: #0f0; font-family: monospace;
+            background: rgba(0,0,0,0.7); padding: 10px 14px; border-radius: 5px;
+            max-width: 240px; cursor: default;
+        }
+        #town .town-name { font-size: 1.1rem; font-weight: bold; }
+        #town .town-region { font-size: 0.85rem; opacity: 0.8; }
+        #town .town-details {
+            max-height: 0; overflow: hidden; opacity: 0;
+            transition: max-height 0.3s ease, opacity 0.3s ease;
+            font-size: 0.85rem; line-height: 1.4;
+        }
+        #town:hover .town-details { max-height: 300px; opacity: 1; margin-top: 8px; }
+        #town .town-details div { margin-top: 6px; }
+        #town .label { opacity: 0.7; }
     </style>
 </head>
 <body>
     <div id="overlay">
-        SPEED: <span id="speed_val">0.00</span> m/s<br>
-        DIST: <span id="dist_val">0</span> m<br>
-        <button id="btn-capture" onclick="takeScreenshot()">📸 SCREENSHOT</button>
+        SPEED: <span id="speed_val">0.0</span> mph<br>
+        DIST: <span id="dist_val">0.00</span> mi<br>
+        TIME: <span id="time_val">0.0</span> min<br>
+        CAL: <span id="cal_val">0</span><br>
+        <button id="btn-capture" onclick="takeScreenshot()">&#128247; SCREENSHOT</button>
     </div>
+
     <div id="pano"></div>
+    <div id="minimap"></div>
+
+    <div id="town" style="display:none">
+        <div class="town-name" id="town_name"></div>
+        <div class="town-region" id="town_region"></div>
+        <div class="town-details">
+            <div><span class="label">Population:</span> <span id="town_pop">?</span></div>
+            <div><span class="label">Famous:</span> <span id="town_famous">?</span></div>
+            <div id="town_fact"></div>
+        </div>
+    </div>
 
     <script>
-        let panorama;
+        let panorama, minimap, minimapMarker;
         let lastPos = { lat: 0, lng: 0 };
         let baseHeading = 0;
         let lastApiCallTime = Date.now();
-        let isUserInteracting = false; // Flag to stop rotation
+        let isUserInteracting = false;
+        let lastTownName = null;
 
-        const API_UPDATE_INTERVAL = 30000; 
-        const TOTAL_ROTATION_DEGREES = 200; // Slowed down
-        const ROTATION_SPEED = TOTAL_ROTATION_DEGREES / (API_UPDATE_INTERVAL / 1000); 
+        // Position now updates once a minute (matches the Pi's capture cadence);
+        // the pano slowly rotates in between.
+        const API_UPDATE_INTERVAL = 60000;
+        const TOTAL_ROTATION_DEGREES = 200;
+        const ROTATION_SPEED = TOTAL_ROTATION_DEGREES / (API_UPDATE_INTERVAL / 1000);
 
         function initPano() {
             panorama = new google.maps.StreetViewPanorama(
                 document.getElementById("pano"),
-                {
-                    position: { lat: 0, lng: 0 },
-                    pov: { heading: 0, pitch: 0 },
-                    visible: true,
-                    disableDefaultUI: true
-                }
+                { position: { lat: 0, lng: 0 }, pov: { heading: 0, pitch: 0 },
+                  visible: true, disableDefaultUI: true }
             );
-
-            // FEATURE 1: Stop rotation on click
-            panorama.addListener('click', () => {
-                console.log("User clicked - pausing rotation.");
-                isUserInteracting = true;
-            });
-
+            panorama.addListener('click', () => { isUserInteracting = true; });
             requestAnimationFrame(rotationLoop);
+        }
+
+        function initMinimap() {
+            minimap = new google.maps.Map(document.getElementById("minimap"), {
+                zoom: 8, center: { lat: 0, lng: 0 }, disableDefaultUI: true,
+                gestureHandling: "none", zoomControl: false,
+            });
+            minimapMarker = new google.maps.Marker({ map: minimap });
+            fetch('/route').then(r => r.json()).then(coords => {
+                const path = coords.map(c => ({ lat: c[0], lng: c[1] }));
+                new google.maps.Polyline({
+                    path, map: minimap, strokeColor: "#0f0",
+                    strokeOpacity: 0.9, strokeWeight: 2,
+                });
+            }).catch(e => console.error("route load failed", e));
         }
 
         function rotationLoop() {
             if (!isUserInteracting) {
-                const now = Date.now();
-                const elapsed = now - lastApiCallTime;
-                
-                const currentRotation = (elapsed / 1000) * ROTATION_SPEED;
-                const totalHeading = (baseHeading + currentRotation) % 360;
-
+                const elapsed = Date.now() - lastApiCallTime;
+                const totalHeading = (baseHeading + (elapsed / 1000) * ROTATION_SPEED) % 360;
                 panorama.setPov({ heading: totalHeading, pitch: 0 });
             }
             requestAnimationFrame(rotationLoop);
@@ -74,53 +118,67 @@
 
         async function takeScreenshot() {
             const btn = document.getElementById('btn-capture');
+            const original = btn.innerHTML;
             btn.innerText = "CAPTURING...";
-            
-            // Capture the entire body
-            const canvas = await html2canvas(document.body, {
-                useCORS: true, // Crucial for Google Maps images
-                allowTaint: true
-            });
-            
-            const base64Image = canvas.toDataURL('image/png');
+            try {
+                const pos = panorama.getPosition();
+                const pov = panorama.getPov();
+                const resp = await fetch('/save_screenshot', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        lat: pos.lat(), lng: pos.lng(),
+                        heading: pov.heading, pitch: pov.pitch,
+                    }),
+                });
+                const result = await resp.json();
+                btn.innerText = resp.ok ? "SAVED ✓" : "FAILED";
+                console.log("Screenshot:", result);
+            } catch (e) {
+                console.error("Screenshot failed", e);
+                btn.innerText = "FAILED";
+            }
+            setTimeout(() => { btn.innerHTML = original; }, 1500);
+        }
 
-            // Send to Flask
-            await fetch('/save_screenshot', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ image: base64Image })
-            });
-
-            btn.innerText = "📸 SCREENSHOT";
-            console.log("Screenshot sent to server.");
+        function updateTown(town) {
+            const box = document.getElementById('town');
+            if (!town || !town.name) { box.style.display = 'none'; return; }
+            box.style.display = 'block';
+            document.getElementById('town_name').innerText = town.name;
+            document.getElementById('town_region').innerText = town.region || '';
+            document.getElementById('town_pop').innerText = town.population || '?';
+            document.getElementById('town_famous').innerText = town.famous_person || '?';
+            document.getElementById('town_fact').innerText = town.fun_fact || '';
+            lastTownName = town.name;
         }
 
         async function pollData() {
             try {
-                const response = await fetch('/data');
-                const data = await response.json();
-                
-                document.getElementById('speed_val').innerText = data.speed.toFixed(2);
-                document.getElementById('dist_val').innerText = data.distance_travelled.toFixed(0);
+                const data = await (await fetch('/data')).json();
+
+                document.getElementById('speed_val').innerText = (data.speed_mph || 0).toFixed(1);
+                document.getElementById('dist_val').innerText = (data.distance_mi || 0).toFixed(2);
+                document.getElementById('time_val').innerText = (data.time_minutes || 0).toFixed(1);
+                document.getElementById('cal_val').innerText = Math.round(data.calories || 0);
+                if (!data.town || data.town.name !== lastTownName) updateTown(data.town);
+
+                const newPos = { lat: data.lat, lng: data.lng };
+                if (minimapMarker) {
+                    minimapMarker.setPosition(newPos);
+                    minimap.setCenter(newPos);
+                }
 
                 const now = Date.now();
                 if (now - lastApiCallTime >= API_UPDATE_INTERVAL) {
                     if (data.lat !== lastPos.lat || data.lng !== lastPos.lng) {
-                        const newPos = { lat: data.lat, lng: data.lng };
-                        
                         const heading = google.maps.geometry.spherical.computeHeading(
-                            new google.maps.LatLng(lastPos),
-                            new google.maps.LatLng(newPos)
-                        );
-
+                            new google.maps.LatLng(lastPos), new google.maps.LatLng(newPos));
                         if (!isNaN(heading)) baseHeading = heading;
-                        
                         panorama.setPosition(newPos);
                         lastPos = newPos;
                         lastApiCallTime = now;
-                        
-                        // FEATURE 1: Resume rotation on teleport
-                        isUserInteracting = false; 
+                        isUserInteracting = false;
                     }
                 }
             } catch (e) { console.error("Poll failed", e); }
@@ -128,6 +186,7 @@
 
         window.onload = () => {
             initPano();
+            initMinimap();
             setInterval(pollData, 500);
         };
     </script>
